@@ -2,6 +2,9 @@
 input/
 output/
 
+# 読み取り専用解析ツールの出力 (コミット不要)
+readonly/output/
+
 # Python
 __pycache__/
 *.py[cod]

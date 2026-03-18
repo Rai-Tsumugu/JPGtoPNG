@@ -7,5 +7,10 @@ scipy>=1.11.0
 tqdm>=4.65.0
 matplotlib>=3.7.0
 scikit-image>=0.21.0
-# Optional: cairosvg>=2.7.0  (requires Cairo native library)
-# Optional: vtracer>=0.6.0   (recommended for convert_svg.py — pip install vtracer)
+# SVG->PNG backends (Stage 2) — install at least one:
+#   pip install cairosvg>=2.7.0    (best quality, requires Cairo native library)
+#   pip install svglib reportlab   (pure Python fallback)
+#   Inkscape on PATH               (system fallback)
+#   ImageMagick on PATH            (system fallback)
+# JPG->SVG backend (Stage 1):
+#   pip install vtracer>=0.6.0     (recommended, Rust-based, fast color tracing)
