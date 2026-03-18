@@ -1,0 +1,40 @@
+# input and output data
+input/
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / intermediate outputs
+*_1_preprocessed.png
+*_2_quantized.png
+*_3_masks_composite.png
+*_vector.svg
+*_restored.png
+
+# Keep test inputs but not outputs
+test_output*.png
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
