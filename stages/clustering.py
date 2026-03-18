@@ -23,6 +23,17 @@ _TILE_SIZE = 2000   # タイル分割サイズ (analyze_logo.py と統一)
 _SAMPLE_STEP = 8    # タイル内サンプリング間隔
 
 
+def _build_kmeans_init(
+    init_centers: Optional[np.ndarray], n_clusters: int
+) -> tuple:
+    """Convert optional RGB init_centers to Lab and return (init, n_init) for MiniBatchKMeans."""
+    if init_centers is not None and len(init_centers) == n_clusters:
+        rgb_arr = np.array(init_centers, dtype=np.uint8).reshape(1, -1, 3)
+        init = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
+        return init, 1  # sklearn requires n_init=1 when init is an array
+    return "k-means++", 5
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Primary clustering
 # ─────────────────────────────────────────────────────────────────────────────
@@ -55,14 +66,7 @@ def cluster_colors(
     lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB).astype(np.float32)
     pixels = lab.reshape(-1, 3)
 
-    # Build init array: custom RGB centroids → Lab, or fall back to k-means++
-    if init_centers is not None and len(init_centers) == n_clusters:
-        rgb_arr = np.array(init_centers, dtype=np.uint8).reshape(1, -1, 3)
-        init = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
-        n_init = 1  # sklearn requires n_init=1 when init is an array
-    else:
-        init = "k-means++"
-        n_init = 5
+    init, n_init = _build_kmeans_init(init_centers, n_clusters)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -128,13 +132,7 @@ def cluster_colors_tiled(
 
     all_samples = np.vstack(samples)
 
-    if init_centers is not None and len(init_centers) == n_clusters:
-        rgb_arr = np.array(init_centers, dtype=np.uint8).reshape(1, -1, 3)
-        init = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
-        n_init = 1
-    else:
-        init = "k-means++"
-        n_init = 5
+    init, n_init = _build_kmeans_init(init_centers, n_clusters)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -160,10 +158,8 @@ def cluster_colors_tiled(
             tile = image[y:y2, x:x2]
             lab = cv2.cvtColor(tile, cv2.COLOR_RGB2LAB).astype(np.float32)
             flat = lab.reshape(-1, 3)
-            # ベクトル化最近傍探索 (analyze_logo.quantize_tile と同ロジック)
-            dists = np.stack(
-                [np.sum((flat - c) ** 2, axis=1) for c in centers_lab], axis=1
-            )
+            # ブロードキャストによる全クラスタ一括距離計算
+            dists = np.sum((flat[:, np.newaxis, :] - centers_lab[np.newaxis, :, :]) ** 2, axis=2)
             labels_full[y:y2, x:x2] = np.argmin(dists, axis=1).reshape(y2 - y, x2 - x)
 
     # セントロイドを RGB に変換

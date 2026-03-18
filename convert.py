@@ -126,18 +126,22 @@ def _run_pre_analysis(input_path: str, verbose: bool) -> Optional[dict]:
         return None
 
 
+_STRAIGHT_THRESHOLD = 0.7  # straight_ratio がこの値を超えると直線主体ロゴとみなす
+
+
 def _compute_vtracer_params(straight_ratio: float) -> dict:
     """
     直線率 (0.0–1.0) から vtracer パラメータを線形補間で計算する。
 
     corner_threshold: 直線ロゴ → 大きく（角を保持）、曲線ロゴ → 小さく（滑らか）
       0.0 → 40, 1.0 → 80（デフォルト 60 は ratio=0.5 相当）
-    mode: straight_ratio > 0.7 では polygon（直線パス）、それ以外は spline（Bezier）
+    mode: straight_ratio > _STRAIGHT_THRESHOLD では polygon（直線パス）、それ以外は spline
     layer_difference: 直線ロゴは色境界を厳密に保持したいので小さく
     """
+    is_straight = straight_ratio > _STRAIGHT_THRESHOLD
     corner_threshold = int(40 + straight_ratio * 40)
-    mode = "polygon" if straight_ratio > 0.7 else "spline"
-    layer_difference = 12 if straight_ratio > 0.7 else 16
+    mode = "polygon" if is_straight else "spline"
+    layer_difference = 12 if is_straight else 16
     return {
         "corner_threshold": corner_threshold,
         "mode": mode,
@@ -168,7 +172,7 @@ def _tune_params_from_report(report: dict, user_n_clusters: Optional[int]) -> di
 
     # vtracer / ベクター化パラメータ
     params["vtracer_params"] = _compute_vtracer_params(straight_ratio)
-    params["use_curves"] = straight_ratio < 0.7  # 直線主体ロゴは polyline モード
+    params["use_curves"] = straight_ratio < _STRAIGHT_THRESHOLD  # 直線主体ロゴは polyline モード
 
     return params
 
@@ -337,7 +341,7 @@ def _png_via_inkscape(svg_path: str, out: str, w: int, h: int) -> Optional[np.nd
              f"--export-width={w}", f"--export-height={h}"],
             capture_output=True, timeout=120,
         )
-        if r.returncode == 0 and Path(out).exists():
+        if r.returncode == 0:
             return np.array(Image.open(out).convert("RGB"), dtype=np.uint8)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -352,7 +356,7 @@ def _png_via_imagemagick(svg_path: str, out: str, w: int, h: int) -> Optional[np
             ["magick", "-density", "150", "-resize", f"{w}x{h}!", svg_path, out],
             capture_output=True, timeout=120,
         )
-        if r.returncode == 0 and Path(out).exists():
+        if r.returncode == 0:
             return np.array(Image.open(out).convert("RGB"), dtype=np.uint8)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -367,7 +371,7 @@ def _png_via_resvg(svg_path: str, out: str, w: int, h: int) -> Optional[np.ndarr
              "--width", str(w), "--height", str(h)],
             capture_output=True, timeout=120,
         )
-        if r.returncode == 0 and Path(out).exists():
+        if r.returncode == 0:
             return np.array(Image.open(out).convert("RGB"), dtype=np.uint8)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -510,9 +514,9 @@ def run(
 
     # ユーザー指定 > 自動 > デフォルト の優先度でパラメータを確定
     final_n_clusters: int = n_clusters or auto.get("n_clusters", 24)
-    vtracer_params: Optional[dict] = auto.get("vtracer_params", None)
+    vtracer_params: Optional[dict] = auto.get("vtracer_params")
     # use_curves はユーザーが --no-curves を指定した場合を除き、自動調整に従う
-    final_use_curves: bool = auto.get("use_curves", use_curves) if auto else use_curves
+    final_use_curves: bool = auto.get("use_curves", use_curves)
 
     # ── [1] 読み込み & ノイズ除去 ──────────────────────────────────────────────
     if verbose:
@@ -524,13 +528,13 @@ def run(
     image = preprocess_jpeg(original, denoise_strength=denoise) if denoise > 0 else original
 
     # ── [2] 色量子化 ──────────────────────────────────────────────────────────
+    is_large = max(h, w) > _LARGE_IMAGE_THRESHOLD
     if verbose:
-        tiled = max(h, w) > _LARGE_IMAGE_THRESHOLD
-        mode_label = "タイル処理" if tiled else "全体処理"
+        mode_label = "タイル処理" if is_large else "全体処理"
         print(f"\n[2/4] 色量子化  k={final_n_clusters}  "
               f"merge-threshold={merge_threshold}  [{mode_label}]")
 
-    if max(h, w) > _LARGE_IMAGE_THRESHOLD:
+    if is_large:
         labels, centers = cluster_colors_tiled(image, n_clusters=final_n_clusters)
     else:
         labels, centers = cluster_colors(image, n_clusters=final_n_clusters)
