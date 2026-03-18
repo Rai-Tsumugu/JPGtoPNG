@@ -13,11 +13,14 @@ Why Lab?
 """
 
 import warnings
-from typing import Tuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 from sklearn.cluster import MiniBatchKMeans
+
+_TILE_SIZE = 2000   # タイル分割サイズ (analyze_logo.py と統一)
+_SAMPLE_STEP = 8    # タイル内サンプリング間隔
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -29,6 +32,7 @@ def cluster_colors(
     n_clusters: int = 24,
     batch_size: int = 20_000,
     random_state: int = 42,
+    init_centers: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Cluster image pixels into N colour groups using MiniBatch K-means in Lab space.
@@ -38,6 +42,8 @@ def cluster_colors(
         n_clusters:   number of desired colour clusters
         batch_size:   mini-batch size (controls speed vs. quality trade-off)
         random_state: reproducibility seed
+        init_centers: (N, 3) uint8 RGB — optional custom initial centroids.
+                      Must have exactly n_clusters rows; otherwise falls back to k-means++.
 
     Returns:
         labels:      (H, W) int32 — cluster index per pixel
@@ -49,15 +55,25 @@ def cluster_colors(
     lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB).astype(np.float32)
     pixels = lab.reshape(-1, 3)
 
+    # Build init array: custom RGB centroids → Lab, or fall back to k-means++
+    if init_centers is not None and len(init_centers) == n_clusters:
+        rgb_arr = np.array(init_centers, dtype=np.uint8).reshape(1, -1, 3)
+        init = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
+        n_init = 1  # sklearn requires n_init=1 when init is an array
+    else:
+        init = "k-means++"
+        n_init = 5
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         kmeans = MiniBatchKMeans(
             n_clusters=n_clusters,
             batch_size=min(batch_size, len(pixels)),
             random_state=random_state,
-            n_init=5,
+            n_init=n_init,
             max_iter=300,
             reassignment_ratio=0.01,
+            init=init,
         )
         kmeans.fit(pixels)
 
@@ -69,6 +85,92 @@ def cluster_colors(
     centers_rgb = cv2.cvtColor(centers_lab_img, cv2.COLOR_LAB2RGB).reshape(-1, 3)
 
     return labels, centers_rgb
+
+
+def cluster_colors_tiled(
+    image: np.ndarray,
+    n_clusters: int = 24,
+    batch_size: int = 20_000,
+    random_state: int = 42,
+    init_centers: Optional[np.ndarray] = None,
+    tile_size: int = _TILE_SIZE,
+    sample_step: int = _SAMPLE_STEP,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Tile-based K-means clustering for large images.
+
+    Splits the image into tiles to avoid loading all pixels into memory at once.
+
+    Phase 1: Collect sampled pixels from each tile (step=sample_step) and fit
+             MiniBatchKMeans globally → stable palette.
+    Phase 2: Label every pixel tile-by-tile using vectorised nearest-centroid
+             assignment (same logic as analyze_logo.quantize_tile).
+
+    Args:
+        image:       RGB uint8 (H, W, 3) — already loaded in memory
+        n_clusters:  number of colour clusters
+        tile_size:   tile edge length in pixels
+        sample_step: pixel stride for Phase-1 sampling
+
+    Returns:
+        labels:      (H, W) int32
+        centers_rgb: (n_clusters, 3) uint8
+    """
+    h, w = image.shape[:2]
+
+    # ── Phase 1: サンプリング → グローバルパレット決定 ──────────────────────
+    samples = []
+    for y in range(0, h, tile_size):
+        for x in range(0, w, tile_size):
+            tile = image[y:min(y + tile_size, h), x:min(x + tile_size, w)]
+            lab = cv2.cvtColor(tile, cv2.COLOR_RGB2LAB).astype(np.float32)
+            samples.append(lab[::sample_step, ::sample_step].reshape(-1, 3))
+
+    all_samples = np.vstack(samples)
+
+    if init_centers is not None and len(init_centers) == n_clusters:
+        rgb_arr = np.array(init_centers, dtype=np.uint8).reshape(1, -1, 3)
+        init = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
+        n_init = 1
+    else:
+        init = "k-means++"
+        n_init = 5
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        kmeans = MiniBatchKMeans(
+            n_clusters=n_clusters,
+            batch_size=min(batch_size, len(all_samples)),
+            random_state=random_state,
+            n_init=n_init,
+            max_iter=300,
+            reassignment_ratio=0.01,
+            init=init,
+        )
+        kmeans.fit(all_samples)
+
+    centers_lab = kmeans.cluster_centers_
+
+    # ── Phase 2: 全ピクセルをタイル単位でラベル付け ─────────────────────────
+    labels_full = np.zeros((h, w), dtype=np.int32)
+    for y in range(0, h, tile_size):
+        for x in range(0, w, tile_size):
+            y2 = min(y + tile_size, h)
+            x2 = min(x + tile_size, w)
+            tile = image[y:y2, x:x2]
+            lab = cv2.cvtColor(tile, cv2.COLOR_RGB2LAB).astype(np.float32)
+            flat = lab.reshape(-1, 3)
+            # ベクトル化最近傍探索 (analyze_logo.quantize_tile と同ロジック)
+            dists = np.stack(
+                [np.sum((flat - c) ** 2, axis=1) for c in centers_lab], axis=1
+            )
+            labels_full[y:y2, x:x2] = np.argmin(dists, axis=1).reshape(y2 - y, x2 - x)
+
+    # セントロイドを RGB に変換
+    centers_lab_u8 = np.clip(centers_lab, 0, 255).astype(np.uint8).reshape(1, -1, 3)
+    centers_rgb = cv2.cvtColor(centers_lab_u8, cv2.COLOR_LAB2RGB).reshape(-1, 3)
+
+    return labels_full, centers_rgb
 
 
 # ─────────────────────────────────────────────────────────────────────────────
